@@ -65,6 +65,26 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
+
+		// get the taint applciaiton time
+		taintApplyTime, err := getStartTime(n, outOfServiceKey)
+		if err != nil { // if fail remove regardless
+			log.Error(err, "Failed to get taint start time")
+
+			err := removeGroupTaintNp(n, outOfServiceKey)
+			if err != nil {
+				log.Error(err, "Failed to remove taints")
+				requeue for 15 seconds at the end
+			}
+		}
+
+
+		if the time has been at least 1 minute and 50 seconds since applicaiton {
+			remove the taint 
+		}
+	}
+
 
 	// TODO(user): your logic here
 	for _, c := range cs {
@@ -90,6 +110,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					log.Info("Taint successfully applied")
 
 					// TODO: Requeue for two minutes 
+					return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
 				} else {
 					log.Info("VM for ", instanceName, " is not in REPAIRING")
 				}
@@ -184,4 +205,12 @@ func patchGroupTaint(n *v1.Node) error {
 	}
 
 	return nil
+}
+
+func taintApplyTime(n *v1.Node, taintKey string) string, error {
+
+}
+
+func removeGroupTaintNp(n *v1.Node, taintKey string) string, error {
+	
 }
