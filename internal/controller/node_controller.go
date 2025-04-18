@@ -109,7 +109,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				
 				vmRepairing, err := checkVMRepairing(instanceName)
 				if err != nil {
-
+					// TODO: Error handling for VM Status Query 
 					break
 				}
 
