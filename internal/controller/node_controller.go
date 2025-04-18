@@ -19,17 +19,26 @@ package controller
 import (
 	"context"
 
-	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const (
+	outOfServiceKey = "node.kubernetes.io/out-of-service:NoExecute"
+	outOfServiceEffect = v1.TaintEffectNoExecute
+)
+
 // NodeReconciler reconciles a Node object
 type NodeReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	ProjectNumber        int
+	ClusterName          string
+	Location             string
+	nodeStatusCache map[string]v1.NodeStatus
 }
 
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;create;update;patch;delete
@@ -47,8 +56,46 @@ type NodeReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.0/pkg/reconcile
 func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
+	log.Info("Reconciling on node")
+
+	n := &v1.node{}
+	err := r.Client.Get(ctx, req.NamespacedName, n)
+	if err != nil {
+		log.Error(err, "Error getting Node", nodeName, req.NamespacedName)
+		return ctrl.Result{}, nil
+	}
+
 
 	// TODO(user): your logic here
+	for _, c := range cs {
+		if (c.Status == v1.ConditionUnknown || c.Status == v1.ConditionFalse) { // need to operate on node
+			if !hasTaintKey(n, outOfServiceKey) {
+				instanceName, err := getVMInstance(n)
+				if err != nil {
+					log.Error(err, "failed to marshal patch for taints update", "nodeName", nodeName, "taint", nodeTermTaint)
+					break
+				}
+				
+				vmRepairing, err := checkVMRepairing(instanceName)
+
+				if vmRepairing{
+					log.Info("VM for ", instanceName, " is in REPAIRING")
+
+					err := patchGroupTaint(n)
+					if err != nil {
+						log.Error(err, "group taint was not applied")
+					}
+
+					log.Info("Taint successfully applied")
+				} else {
+					log.Info("VM for ", instanceName, " is not in REPAIRING")
+				}
+			} else {
+				log.Info("Found an unhealthy nodes that already has the groupTaint")
+			}
+			break
+		}
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -58,4 +105,77 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Node{}).
 		Complete(r)
+}
+
+
+func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == searchTaintKey {
+			return true
+		}
+	}
+	return false
+}
+
+func getVMInstance(node *v1.Node) string, error {
+	annotations := node.Annotations
+	nodeIDAnnotationValue, ok := annotations["csi.volume.kubernetes.io/nodeid"]
+
+	if ok {
+		log.Info("Found csi.volume.kubernetes.io/nodeid annotation on node ", node.Name, ": ", nodeIDAnnotationValue)
+	} else {
+		log.Info("csi.volume.kubernetes.io/nodeid annotation not found on node ", node.Name)
+	}
+	var nodeid map[string]string
+
+	err := json.Unmarshal([]byte(annotationValue), &nodeid)
+	if err != nil {
+		return "", log.Error(err, "failed to unmarshal annotation JSON: ")
+	}
+
+	if pdCSIValue, ok := nodeid["pd.csi.storage.gke.io"]; ok {
+		parts := strings.Split(pdCSIValue, "/")
+		if len(parts) > 0 && parts[len(parts)-2] == "instances" {
+			return parts[len(parts)-1], nil
+		}
+		return "", log.Error("instance name not found in expected format: ", pdCSIValue)
+	}
+
+	return "", log.Error("key 'pd.csi.storage.gke.io' not found in annotation")
+}
+
+func checkVMRepairing(instanceName string) bool, error {
+
+}
+
+func patchGroupTaint(n *v1.Node) error {
+	currentTime := time.Now() 
+	startTime := currentTime.Format(time.RFC3339)
+
+	groupTaint := &v1.Taint{
+		Key: outOfServiceKey,
+		Value: startTime,
+		Effect: outOfServiceEffect,
+	}
+
+	updatedTaints := append(n.Spec.Taints, *groupTaint)
+	patch := map[string][]v1.Taint{
+		"spec": {
+			updatedTaints,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		log.Error(err, "failed to marshal patch for taints update", "nodeName", nodeName, "taint", nodeTermTaint)
+		return err
+	}
+
+	err = r.Client.Patch(ctx, n, client.RawPatch(types.MergePatchType, patchBytes))
+	if err != nil {
+		log.Error(err, "error applying taint on node using append and patch", "nodeName", nodeName, "taint", nodeTermTaint)
+		return err
+	}
+
+	return nil
 }
