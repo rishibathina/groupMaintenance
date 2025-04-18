@@ -38,7 +38,6 @@ type NodeReconciler struct {
 	ProjectNumber        int
 	ClusterName          string
 	Location             string
-	nodeStatusCache map[string]v1.NodeStatus
 }
 
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;create;update;patch;delete
@@ -96,18 +95,16 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
-
-	// TODO(user): your logic here
 	for _, c := range cs {
 		if (c.Status == v1.ConditionUnknown || c.Status == v1.ConditionFalse) { // need to operate on node
 			if !hasTaintKey(n, outOfServiceKey) {
-				instanceName, err := getVMInstance(n)
-				if err != nil {
-					log.Error(err, "failed to marshal patch for taints update", "nodeName", nodeName, "taint", nodeTermTaint)
+				projectID, zone, instanceName := getVMInfo(n)
+				if projectID == "" || zone == "" || instanceName == "" {
+					log.Error(err, "failed to get accurate VM info for node:", nodeName)
 					break
 				}
 				
-				vmRepairing, err := checkVMRepairing(instanceName)
+				vmRepairing, err := checkVMRepairing(projectID, zone, instanceName, ctx)
 				if err != nil {
 					// TODO: Error handling for VM Status Query 
 					break
@@ -153,37 +150,55 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Get the VM instance of the node
-// TODO: Just get HostName dumbass
-func getVMInstance(node *v1.Node) string, error {
-	annotations := node.Annotations
-	nodeIDAnnotationValue, ok := annotations["csi.volume.kubernetes.io/nodeid"]
+// Returns strings in the order of: projectID, Zone, instanceName
+func getVMInfo(node *v1.Node) string, string, string {
+	providerID := node.Spec.ProviderID
+	if !strings.HasPrefix(providerID, "gce://") {
+		return "", "", ""
+	} 
 
-	if ok {
-		log.Info("Found csi.volume.kubernetes.io/nodeid annotation on node ", node.Name, ": ", nodeIDAnnotationValue)
-	} else {
-		log.Info("csi.volume.kubernetes.io/nodeid annotation not found on node ", node.Name)
-	}
-	var nodeid map[string]string
-
-	err := json.Unmarshal([]byte(annotationValue), &nodeid)
-	if err != nil {
-		return "", log.Error(err, "failed to unmarshal annotation JSON: ")
+	parts := strings.Split(strings.TrimPrefix(providerID, "gce://"), "/")
+	if len(parts) != 3 {
+		return "", "", ""
 	}
 
-	if pdCSIValue, ok := nodeid["pd.csi.storage.gke.io"]; ok {
-		parts := strings.Split(pdCSIValue, "/")
-		if len(parts) > 0 && parts[len(parts)-2] == "instances" {
-			return parts[len(parts)-1], nil
-		}
-		return "", log.Error("instance name not found in expected format: ", pdCSIValue)
-	}
-
-	return "", log.Error("key 'pd.csi.storage.gke.io' not found in annotation")
+	return parts[0], parts[1], parts[2]
 }
 
 // Check if the VM instance is in repairing status
-func checkVMRepairing(instanceName string) bool, error {
+func checkVMRepairing(projectID string, zone string, instanceName string, ctx context.Context) bool, error {
+	instancesClient, err := compute.NewInstancesRESTClient(ctx)
+	if err != nil {
+		log.Error("compute.NewInstancesRESTClient: %v", err)
+		return false, err
+	}
+	defer instancesClient.Close()
 
+	req := &compute.GetInstanceRequest{
+		Project:  projectID,
+		Zone:     zone,
+		Instance: instanceName,
+	}
+
+	instance, err := instancesClient.Get(ctx, req)
+	if err != nil {
+		log.Error("Get: %v", err)
+		return false, err
+	}
+
+	if instance.getName() != instanceName {
+		log.Info("Received instance name does not match requested name, requested: ", instanceName, " received: ", instance.getName())
+		return false, nil
+	}
+
+	switch instance.getStatus() {
+	case "REPAIRING":
+		log.Info("VM ", instanceName, " is currently in REPAIRING state.")
+		return true, nil
+	default:
+		log.Info("VM ", instanceName, " is not in REPAIRING state.")
+		return false, nil
+	}
 }
 
 // Patches the node with the group taint 
