@@ -84,6 +84,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					err := patchGroupTaint(n)
 					if err != nil {
 						log.Error(err, "group taint was not applied")
+						break
 					}
 
 					log.Info("Taint successfully applied")
@@ -107,7 +108,7 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-
+// Check if Taint with the given key exists on the node
 func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
 	for _, taint := range node.Spec.Taints {
 		if taint.Key == searchTaintKey {
@@ -117,6 +118,7 @@ func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
 	return false
 }
 
+// Get the VM instance of the node
 func getVMInstance(node *v1.Node) string, error {
 	annotations := node.Annotations
 	nodeIDAnnotationValue, ok := annotations["csi.volume.kubernetes.io/nodeid"]
@@ -144,10 +146,12 @@ func getVMInstance(node *v1.Node) string, error {
 	return "", log.Error("key 'pd.csi.storage.gke.io' not found in annotation")
 }
 
+// Check if the VM instance is in repairing status
 func checkVMRepairing(instanceName string) bool, error {
 
 }
 
+// Patches the node with the group taint 
 func patchGroupTaint(n *v1.Node) error {
 	currentTime := time.Now() 
 	startTime := currentTime.Format(time.RFC3339)
