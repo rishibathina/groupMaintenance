@@ -66,22 +66,31 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
+		removeTaint := false
 
-		// get the taint applciaiton time
-		taintApplyTime, err := getStartTime(n, outOfServiceKey)
+		// get the taint application time
+		taintApplyTime, err := getTaintApplyTime(n, outOfServiceKey)
 		if err != nil { // if fail remove regardless
 			log.Error(err, "Failed to get taint start time")
+			removeTaint = true
+		}
 
+		// check if taint took too long
+		// if it errors in the process, returns true anyway
+		taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
+		if err != nil {
+			log.Error(err, "Could not check if the taint has been on for too long")
+		}
+		if taintTooLong {
+			removeTaint = true
+		}
+
+		if removeTaint {
 			err := removeGroupTaintNp(n, outOfServiceKey)
 			if err != nil {
 				log.Error(err, "Failed to remove taints")
 				requeue for 15 seconds at the end
 			}
-		}
-
-
-		if the time has been at least 1 minute and 50 seconds since applicaiton {
-			remove the taint 
 		}
 	}
 
@@ -129,16 +138,6 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Node{}).
 		Complete(r)
-}
-
-// Check if Taint with the given key exists on the node
-func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
-	for _, taint := range node.Spec.Taints {
-		if taint.Key == searchTaintKey {
-			return true
-		}
-	}
-	return false
 }
 
 // Get the VM instance of the node
@@ -207,10 +206,44 @@ func patchGroupTaint(n *v1.Node) error {
 	return nil
 }
 
-func taintApplyTime(n *v1.Node, taintKey string) string, error {
+// Check if Taint with the given key exists on the node
+func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == searchTaintKey {
+			return true
+		}
+	}
+	return false
+}
+
+// get the application time of the taint
+func getTaintApplyTime(n *v1.Node, taintKey string) string {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == taintKey {
+			return taint.Value
+		}
+	}
+	return ""
+}
+
+// remove the taints off of the nodepool
+// return true if there is an error, meaning take off the taint anyway
+func removeGroupTaintNp(n *v1.Node, taintKey string) string, error {
 
 }
 
-func removeGroupTaintNp(n *v1.Node, taintKey string) string, error {
-	
+func isTaintAppliedTooLong(taintApplyTimeStr string) (bool, error) {
+	if taintApplyTimeStr == "" {
+		return true, fmt.Errorf("taint apply time string is empty")
+	}
+
+	parsedApplyTime, err := time.Parse(time.RFC3339, taintApplyTimeStr)
+	if err != nil {
+		return true, fmt.Errorf("error parsing taint apply time: %v", err)
+	}
+
+	currentTime := time.Now() 
+	durationSinceApply := currentTime.Sub(parsedApplyTime)
+
+	return durationSinceApply >= (2 * time.Minute), nil
 }
