@@ -88,6 +88,8 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					}
 
 					log.Info("Taint successfully applied")
+
+					// TODO: Requeue for two minutes 
 				} else {
 					log.Info("VM for ", instanceName, " is not in REPAIRING")
 				}
