@@ -65,6 +65,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	requeueAtEnd := false
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
 		removeTaint := false
 
@@ -89,7 +90,8 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			err := removeGroupTaintNp(n, outOfServiceKey)
 			if err != nil {
 				log.Error(err, "Failed to remove taints")
-				requeue for 15 seconds at the end
+				// requeue for 15 seconds at the end
+				requeueAtEnd = true
 			}
 		}
 	}
@@ -106,10 +108,15 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				}
 				
 				vmRepairing, err := checkVMRepairing(instanceName)
+				if err != nil {
+
+					break
+				}
 
 				if vmRepairing{
 					log.Info("VM for ", instanceName, " is in REPAIRING")
 
+					// TODO: Add tainting nodepool 
 					err := patchGroupTaint(n)
 					if err != nil {
 						log.Error(err, "group taint was not applied")
@@ -129,8 +136,13 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			break
 		}
 	}
-
-	return ctrl.Result{}, nil
+	
+	if !requeueAtEnd { 
+		return ctrl.Result{}, nil
+	} else { 
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	}
+	
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -141,6 +153,7 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // Get the VM instance of the node
+// TODO: Just get HostName dumbass
 func getVMInstance(node *v1.Node) string, error {
 	annotations := node.Annotations
 	nodeIDAnnotationValue, ok := annotations["csi.volume.kubernetes.io/nodeid"]
