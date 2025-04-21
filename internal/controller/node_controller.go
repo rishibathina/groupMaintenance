@@ -303,7 +303,6 @@ func (r *NodeReconciler) patchTaint(ctx context.Context, n *v1.Node, taintToPatc
 }
 
 // remove the taints off of the nodepool
-// return true if there is an error, meaning take off the taint anyway
 func removeGroupTaintNp(n *v1.Node, taintKey string) error {
 	nl, err := listNodesInNodepool(&n)
 	if err != nil {
