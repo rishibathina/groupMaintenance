@@ -18,7 +18,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"log"
 
+	compute "cloud.google.com/go/compute/apiv1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,25 +67,27 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	// Check if the node has the taint for atleast 2 minutes
 	requeueAtEnd := false
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
 		removeTaint := false
 
 		// get the taint application time
-		taintApplyTime, err := getTaintApplyTime(n, outOfServiceKey)
-		if err != nil { // if fail remove regardless
+		// taintApplyTime == "" if apply time isnt found
+		taintApplyTime := getTaintApplyTime(n, outOfServiceKey)
+		if taintApplyTime == "" { // if empty remove regardless
 			log.Error(err, "Failed to get taint start time")
 			removeTaint = true
-		}
-
-		// check if taint took too long
-		// if it errors in the process, returns true anyway
-		taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
-		if err != nil {
-			log.Error(err, "Could not check if the taint has been on for too long")
-		}
-		if taintTooLong {
-			removeTaint = true
+		} else {
+			// check if taint took too long
+			// if it errors in the process, returns true anyway
+			taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
+			if err != nil {
+				log.Error(err, "Could not check if the taint has been on for too long")
+			}
+			if taintTooLong {
+				removeTaint = true
+			}
 		}
 
 		if removeTaint {
@@ -94,35 +99,39 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 		}
 	}
-
+	
+	// In MC this should be last
+	// Check if the node needs the taint 
 	for _, c := range cs {
 		if (c.Status == v1.ConditionUnknown || c.Status == v1.ConditionFalse) { // need to operate on node
-			if !hasTaintKey(n, outOfServiceKey) {
+			if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
 				projectID, zone, instanceName := getVMInfo(n)
 				if projectID == "" || zone == "" || instanceName == "" {
-					log.Error(err, "failed to get accurate VM info for node:", nodeName)
+					log.Error(err, "failed to get accurate VM info for node: ", nodeName)
 					break
 				}
 				
 				vmRepairing, err := checkVMRepairing(projectID, zone, instanceName, ctx)
 				if err != nil {
-					// TODO: Error handling for VM Status Query 
+					log.Error(err, "failed to check if VM is in REPAIRING: ", nodeName)
 					break
 				}
 
-				if vmRepairing{
+				if vmRepairing { // VM is in repairing and condition is either Unknown or notReady
 					log.Info("VM for ", instanceName, " is in REPAIRING")
 
 					// TODO: Add tainting nodepool 
+					// taint the nodes in the nodepool associated with this node
 					err := patchGroupTaint(n)
 					if err != nil {
 						log.Error(err, "group taint was not applied")
+						requeueAtEnd = true
 						break
 					}
 
 					log.Info("Taint successfully applied")
 
-					// TODO: Requeue for two minutes 
+					// Requeue to serve as a timeout for the taint
 					return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
 				} else {
 					log.Info("VM for ", instanceName, " is not in REPAIRING")
@@ -134,9 +143,9 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 	
-	if !requeueAtEnd { 
+	if !requeueAtEnd { // if nothing went wrong along the way 
 		return ctrl.Result{}, nil
-	} else { 
+	} else { // if something went wrong in the process, requeue for 15 seconds later
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 	
@@ -182,7 +191,7 @@ func checkVMRepairing(projectID string, zone string, instanceName string, ctx co
 
 	instance, err := instancesClient.Get(ctx, req)
 	if err != nil {
-		log.Error("Get: %v", err)
+		log.Error("Error getting instance info: ", err)
 		return false, err
 	}
 
@@ -236,7 +245,9 @@ func patchGroupTaint(n *v1.Node) error {
 
 // Check if Taint with the given key exists on the node
 func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
-	for _, taint := range node.Spec.Taints {
+	taints := node.Spec.Taints 
+
+	for _, taint := range taints {
 		if taint.Key == searchTaintKey {
 			return true
 		}
