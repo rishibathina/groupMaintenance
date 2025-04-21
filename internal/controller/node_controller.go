@@ -117,7 +117,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 
 		if removeTaint {
-			err := removeGroupTaintNp(n, outOfServiceKey)
+			err := r.removeGroupTaintNp(ctx, n, outOfServiceKey)
 			if err != nil {
 				log.Error(err, "Failed to remove taints")
 				// requeue for 15 seconds at the end
@@ -261,7 +261,7 @@ func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error 
 			log.Info("Patching node with group taint", "nodeName:", otherNode.Name, "taint:", groupTaint)
 
 			// Patch the node with the group taint
-			if err := r.patchTaint(ctx, &otherNode, groupTaint); err != nil {
+			if err := r.patchTaint(ctx, &otherNode, append(otherNode.Spec.Taints, groupTaint)); err != nil {
 				log.Error(err, "failed to patch node with group taint", "nodeName", otherNode.Name, "taint", groupTaint)
 				return err
 			}
@@ -269,7 +269,7 @@ func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error 
 	}
 
 	// taint the current node 
-	err := r.patchTaint(ctx, &n, groupTaint)
+	err := r.patchTaint(ctx, &n, append(n.Spec.Taints, groupTaint))
 	if err != nil {
 		log.Error(err, "failed to patch the current node with group taint", "nodeName", n.Name, "taint", groupTaint)
         return err
@@ -279,11 +279,10 @@ func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error 
 }
 
 // Patch the node with the requested taint
-func (r *NodeReconciler) patchTaint(ctx context.Context, n *v1.Node, taintToPatch *v1.Taint) error {
-	updatedTaints := append(n.Spec.Taints, *taintToPatch)
+func (r *NodeReconciler) patchTaint(ctx context.Context, n *v1.Node, taintsToPatch v1.Taint[]) error {
 	patch := map[string][]v1.Taint{
 		"spec": {
-			updatedTaints,
+			taintsToPatch,
 		},
 	}
 
@@ -303,7 +302,7 @@ func (r *NodeReconciler) patchTaint(ctx context.Context, n *v1.Node, taintToPatc
 }
 
 // remove the taints off of the nodepool
-func removeGroupTaintNp(n *v1.Node, taintKey string) error {
+func (r *NodeReconciler) removeGroupTaintNp(ctx context.Context, n *v1.Node, taintKey string) error {
 	nl, err := listNodesInNodepool(&n)
 	if err != nil {
 		log.Error("Unable to list nodes in nodepool for removing taint")
@@ -314,12 +313,20 @@ func removeGroupTaintNp(n *v1.Node, taintKey string) error {
 	for _, otherNode := range nl.Items {
 		otherNodePoolName, otherOk := otherNode.Labels[nodePoolLabel]
 		if otherOk && otherNodePoolName == npName && otherNode.Name != n.Name { // checking that the nodepool is the same and it isn't the current node
-			log.Info("Removing group taint off of node,", "nodeName:", otherNode.Name, "taint:", groupTaint)
+			log.Info("Removing group taint off of node,", "nodeName:", otherNode.Name, "taint:", taintKey)
 			otherNode.Spec.Taints = removeTaintKey(taintKey, otherNode.Spec.Taints)
+			if err := r.patchTaint(ctx, &otherNode, otherNode.Spec.Taints); err != nil {
+				log.Error(err, "failed to remove group taint off of node", "nodeName", otherNode.Name, "taint", taintKey)
+				return err
+			}
 		}
 	}
 
 	n.Spec.Taints = removeTaintKey(taintKey, n.Spec.Taints)
+	if err := r.patchTaint(ctx, &n, n.Spec.Taints); err != nil {
+		log.Error(err, "failed to remove group taint off of node", "nodeName", n.Name, "taint", taintKey)
+		return err
+	}
 	return nil
 }
 
