@@ -96,10 +96,12 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Check if the node has the taint for atleast 2 minutes
 	// or the node has come back online
 	requeueAtEnd := false
+	// TODO AND IT IS IN THE CACHE
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
 		removeTaint := false
 
 		if (c.Status == v1.ConditionTrue) { // if node comes back online
+			// TODO: ONLY IF IT IS IN THE CACHE 
 			removeTaint = true
 		} else {
 			// get the taint application time
