@@ -94,25 +94,30 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// Check if the node has the taint for atleast 2 minutes
+	// or the node has come back online
 	requeueAtEnd := false
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
 		removeTaint := false
 
-		// get the taint application time
-		// taintApplyTime == "" if apply time isnt found
-		taintApplyTime := getTaintApplyTime(n, outOfServiceKey)
-		if taintApplyTime == "" { // if empty remove regardless
-			log.Error(err, "Failed to get taint start time")
+		if (c.Status == v1.ConditionTrue) { // if node comes back online
 			removeTaint = true
 		} else {
-			// check if taint took too long
-			// if it errors in the process, returns true anyway
-			taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
-			if err != nil {
-				log.Error(err, "Could not check if the taint has been on for too long")
-			}
-			if taintTooLong {
+			// get the taint application time
+			// taintApplyTime == "" if apply time isnt found
+			taintApplyTime := getTaintApplyTime(n, outOfServiceKey)
+			if taintApplyTime == "" { // if empty remove regardless
+				log.Error(err, "Failed to get taint start time")
 				removeTaint = true
+			} else {
+				// check if taint took too long
+				// if it errors in the process, returns true anyway
+				taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
+				if err != nil {
+					log.Error(err, "Could not check if the taint has been on for too long")
+				}
+				if taintTooLong {
+					removeTaint = true
+				}
 			}
 		}
 
