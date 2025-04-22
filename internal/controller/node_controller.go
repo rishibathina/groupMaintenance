@@ -17,14 +17,15 @@ limitations under the License.
 package controller
 
 import (
-	"log"
 	"context"
 	"encoding/json"
 	"fmt"
+	// "log"
 	"strconv"
 	"strings"
 	"time"
 
+	compute "cloud.google.com/go/compute/apiv1"
 	"github.com/prometheus/client_golang/prometheus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -52,8 +53,8 @@ const (
 	//Taints
 	maintenanceWindowStartTaintKey = "cloud.google.com/maintenance-window-started"
 	nodeTerminationTaintKey        = "cloud.google.com/impending-node-termination"
-	outOfServiceKey = "node.kubernetes.io/out-of-service:NoExecute"
-	outOfServiceEffect = v1.TaintEffectNoExecute
+	outOfServiceKey                = "node.kubernetes.io/out-of-service:NoExecute"
+	outOfServiceEffect             = v1.TaintEffectNoExecute
 )
 
 var log = ctrl.Log.WithName("groupMaintenanceController")
@@ -61,11 +62,11 @@ var log = ctrl.Log.WithName("groupMaintenanceController")
 // NodeReconciler reconciles a Node object
 type NodeReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	ProjectNumber        int
-	ClusterName          string
-	Location             string
-	triggerNodeCache map[string]string // node that triggered group tainting -> nodepool it is a part of
+	Scheme                *runtime.Scheme
+	ProjectNumber         int
+	ClusterName           string
+	Location              string
+	triggerNodeCache      map[string]string // node that triggered group tainting -> nodepool it is a part of
 	taintingNodepoolCache map[string]string // nodepool name that is tainted -> trigger node
 }
 
@@ -86,16 +87,15 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// _ = log.FromContext(ctx)
 	log.Info("Reconciling on node")
 
-	n := &v1.node{}
+	n := &v1.Node{}
 	err := r.Client.Get(ctx, req.NamespacedName, n)
 	if err != nil {
 		log.Error(err, "Error getting Node", nodeName, req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
-	"""
-	Removing Taint logic
-	"""
+	// REMOVING TAINT LOGIC
+
 	// Check if the node has the taint for atleast 2 minutes
 	// or the node has come back online
 	requeueAtEnd := false
@@ -103,10 +103,10 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// TODO: AND IT IS IN THE CACHE
 	// TODO: fix this so that it accounts for edge case where trigger node wasnt tainted but other nodes in the pool were do to sm issue when tainting
-	_, ok := triggerNodeCache[n.Name]
+	_, ok := r.triggerNodeCache[n.Name]
 	if ok { // has trigger node
 		// TODO: FIX this
-		if isNodeReady(&n) { // if node comes back online
+		if isNodeReady(n) { // if node comes back online
 			removeTaint = true
 		} else if hasTaintKey(n, outOfServiceKey) { // timeout case
 			// get the taint application time
@@ -118,7 +118,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			} else {
 				// check if taint took too long
 				// if it errors in the process, returns true anyway
-				taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
+				taintTooLong, err := isTaintAppliedTooLong(taintApplyTime)
 				if err != nil {
 					log.Error(err, "Could not check if the taint has been on for too long")
 					removeTaint = true
@@ -129,7 +129,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 		} else { // not back online and doesnt have taint but is trigger node (issue when group patching)
 			// TODO: group taint nodes
-			err := addToGroupCaches()
+			r.addToGroupCaches(n)
 
 			err := r.patchGroupTaint(ctx, n)
 			if err != nil {
@@ -146,28 +146,24 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				requeueAtEnd = true
 			} else {
 				// TODO: REMOVE NODE FROM CACHE AND NODPOOL FROM CACHE
-				err := removeFromGroupCaches(&n)
+				r.removeFromGroupCaches(n)
 				// if err != nil {
 				// 	// TODO: NOT SURE HOW TO ERROR HANDLER HERE
-					
+
 				// }
 			}
 		}
 	}
-	
 
+	// Applying Taint logic
 
-	"""
-	Applying Taint logic
-	"""
 	// In MC this should be last
-	// Check if the node needs the taint 
-	requeueTwoMins := false 
-	nodeStatus := n.Status.Conditions.Status
+	// Check if the node needs the taint
+	requeueTwoMins := false
 
-	ok, nodepoolInCache := checkNodepoolCache(&n)
+	ok, nodepoolInCache := checkNodepoolCache(n)
 	// TODO: its nodepool is not in the cache
-	if isNodeNotReadyOrUnknown(&n) && !removeTaint && ok && !nodepoolInCache { // need to operate on node
+	if isNodeNotReadyOrUnknown(n) && !removeTaint && ok && !nodepoolInCache { // need to operate on node
 		// Node unready and nodepool not in cache
 
 		if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
@@ -193,7 +189,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 				// taint the nodes in the nodepool associated with this node
 				// TODO: ADD TO CACHE HERE BOTH THE NODEPOOL AND THE TRIGGER NODE
-				err := addToGroupCaches()
+				r.addToGroupCaches(n)
 
 				err := r.patchGroupTaint(ctx, n)
 				if err != nil {
@@ -218,12 +214,12 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		} else { // THIS SHOULD NEVER HAPPEN SINCE IF IT HAS THE TAINT THE NODEPOOL SHOULD BE IN THE CACHE
 			log.Info("Found an unhealthy nodes that already has the groupTaint")
 		}
-		
+
 	}
 
 	if requeueTwoMins {
 		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
-	} else if requeueAtEnd { // if nothing went wrong along the way 
+	} else if requeueAtEnd { // if nothing went wrong along the way
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	} else { // if something went wrong in the process, requeue for 15 seconds later
 		return ctrl.Result{}, nil
@@ -233,7 +229,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 // SetupWithManager sets up the controller with the Manager.
 func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&corev1.Node{}).
+		For(&v1.Node{}).
 		Complete(r)
 }
 
@@ -265,7 +261,7 @@ func getVMInfo(node *v1.Node) (string, string, string) {
 	providerID := node.Spec.ProviderID
 	if !strings.HasPrefix(providerID, "gce://") {
 		return "", "", ""
-	} 
+	}
 
 	parts := strings.Split(strings.TrimPrefix(providerID, "gce://"), "/")
 	if len(parts) != 3 {
@@ -279,7 +275,7 @@ func getVMInfo(node *v1.Node) (string, string, string) {
 func (r *NodeReconciler) checkVMRepairing(projectID string, zone string, instanceName string, ctx context.Context) (bool, error) {
 	instancesClient, err := compute.NewInstancesRESTClient(ctx)
 	if err != nil {
-		log.Error("compute.NewInstancesRESTClient: %v", err)
+		log.Error(err, "compute.NewInstancesRESTClient did not work")
 		return false, err
 	}
 	defer instancesClient.Close()
@@ -292,16 +288,16 @@ func (r *NodeReconciler) checkVMRepairing(projectID string, zone string, instanc
 
 	instance, err := instancesClient.Get(ctx, req)
 	if err != nil {
-		log.Error("Error getting instance info: ", err)
+		log.Error(err, "Error getting instance info")
 		return false, err
 	}
 
-	if instance.getName() != instanceName {
-		log.Info("Received instance name does not match requested name, requested: ", instanceName, " received: ", instance.getName())
+	if instance.GetName() != instanceName {
+		log.Info("Received instance name does not match requested name, requested: ", instanceName, " received: ", instance.GetName())
 		return false, nil
 	}
 
-	switch instance.getStatus() {
+	switch instance.GetStatus() {
 	case "REPAIRING":
 		log.Info("VM ", instanceName, " is currently in REPAIRING state.")
 		return true, nil
@@ -311,15 +307,15 @@ func (r *NodeReconciler) checkVMRepairing(projectID string, zone string, instanc
 	}
 }
 
-// Patches the node with the group taint 
+// Patches the node with the group taint
 func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error {
-	// create groupTaint 
-	currentTime := time.Now() 
+	// create groupTaint
+	currentTime := time.Now()
 	startTime := currentTime.Format(time.RFC3339)
 
 	groupTaint := &v1.Taint{
-		Key: outOfServiceKey,
-		Value: startTime,
+		Key:    outOfServiceKey,
+		Value:  startTime,
 		Effect: outOfServiceEffect,
 	}
 
@@ -333,7 +329,7 @@ func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error 
 	for _, otherNode := range nl.Items {
 		otherNodePoolName, otherOk := otherNode.Labels[nodePoolLabel]
 		if otherOk && otherNodePoolName == npName && otherNode.Name != n.Name { // checking that the nodepool is the same and it isn't the current node
-			// TODO: CHECK IF THE NODE ALREADY HAS THE TAINT WE DONT WANT TO ADD TWO INSTANCES OF THE SAME TAINT 
+			// TODO: CHECK IF THE NODE ALREADY HAS THE TAINT WE DONT WANT TO ADD TWO INSTANCES OF THE SAME TAINT
 			log.Info("Patching node with group taint", "nodeName:", otherNode.Name, "taint:", groupTaint)
 
 			// Patch the node with the group taint
@@ -344,18 +340,18 @@ func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error 
 		}
 	}
 
-	// taint the current node 
+	// taint the current node
 	err := r.patchTaint(ctx, &n, append(n.Spec.Taints, groupTaint))
 	if err != nil {
 		log.Error(err, "failed to patch the current node with group taint", "nodeName", n.Name, "taint", groupTaint)
-        return err
+		return err
 	}
 
 	return nil
 }
 
 // Patch the node with the requested taint
-func (r *NodeReconciler) patchTaint(ctx context.Context, n *v1.Node, taintsToPatch v1.Taint[]) error {
+func (r *NodeReconciler) patchTaint(ctx context.Context, n *v1.Node, taintsToPatch []v1.Taint) error {
 	patch := map[string][]v1.Taint{
 		"spec": {
 			taintsToPatch,
@@ -384,7 +380,6 @@ func (r *NodeReconciler) removeGroupTaintNp(ctx context.Context, n *v1.Node, tai
 		log.Error("Unable to list nodes in nodepool for removing taint")
 		return err
 	}
-
 
 	for _, otherNode := range nl.Items {
 		otherNodePoolName, otherOk := otherNode.Labels[nodePoolLabel]
@@ -433,7 +428,7 @@ func getTaintIndex(searchTaintKey string, taints []v1.Taint) int {
 
 // Check if Taint with the given key exists on the node
 func hasTaintKey(node *v1.Node, searchTaintKey string) bool {
-	taints := node.Spec.Taints 
+	taints := node.Spec.Taints
 
 	for _, taint := range taints {
 		if taint.Key == searchTaintKey {
@@ -464,13 +459,13 @@ func isTaintAppliedTooLong(taintApplyTimeStr string) (bool, error) {
 		return true, fmt.Errorf("error parsing taint apply time: %v", err)
 	}
 
-	currentTime := time.Now() 
+	currentTime := time.Now()
 	durationSinceApply := currentTime.Sub(parsedApplyTime)
 
 	return durationSinceApply >= (2 * time.Minute), nil
 }
 
-func listNodesInNodepool(n *v1.Node) (*v1.NodeList, error){
+func listNodesInNodepool(n *v1.Node) (*v1.NodeList, error) {
 	// Get the NodePool label
 	npName, ok := n.Labels[nodePoolLabel]
 	if !ok {
@@ -503,7 +498,7 @@ func checkNodepoolCache(n *v1.Node) (bool, bool) {
 	nodepoolInCache := false
 	npName, ok := n.Labels[nodePoolLabel]
 	if ok {
-		_, found := taintingNodepoolCache[npName]
+		_, found := r.taintingNodepoolCache[npName]
 		if found {
 			nodepoolInCache = true
 		}
@@ -512,30 +507,30 @@ func checkNodepoolCache(n *v1.Node) (bool, bool) {
 	return ok, nodepoolInCache
 }
 
-func removeFromGroupCaches(n *v1.Node) err {
-	delete(triggerNodeCache, n.Name)
+func (r *NodeReconciler) removeFromGroupCaches(n *v1.Node) err {
+	delete(r.triggerNodeCache, n.Name)
 
 	npName, ok := n.Labels[nodePoolLabel]
 	if !ok {
 		return fmt.Errorf("Node does not have the nodepool label", "nodeName", n.Name, "label", nodePoolLabel)
 	}
 
-	delete(taintingNodepoolCache, npName)
+	delete(r.taintingNodepoolCache, npName)
 	return nil
 }
 
-func addToGroupCaches(n *v1.Node) err {
+func (r *NodeReconciler) addToGroupCaches(n *v1.Node) err {
 	npName, ok := n.Labels[nodePoolLabel]
 	if !ok {
 		return fmt.Errorf("Node does not have the nodepool label", "nodeName", n.Name, "label", nodePoolLabel)
 	}
 
-	if _, exists := triggerNodeCache[n.Name]; !exists {
-		triggerNodeCache[n.Name] = npName
+	if _, exists := r.triggerNodeCache[n.Name]; !exists {
+		r.triggerNodeCache[n.Name] = npName
 	}
 
-	if _, exists := taintingNodepoolCache[npName]; !exists {
-		taintingNodepoolCache[npName] = n.Name
+	if _, exists := r.taintingNodepoolCache[npName]; !exists {
+		r.taintingNodepoolCache[npName] = n.Name
 	}
 
 	return nil
