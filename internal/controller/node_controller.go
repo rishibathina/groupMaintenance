@@ -108,7 +108,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	_, ok := triggerNodeCache[n.Name]
 	if ok { // has trigger node
 		// TODO: FIX this
-		if (n.Status.Conditions.Status == v1.ConditionTrue) { // if node comes back online
+		if isNodeReady(&n) { // if node comes back online
 			removeTaint = true
 		} else if hasTaintKey(n, outOfServiceKey) { // timeout case
 			// get the taint application time
@@ -131,7 +131,8 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			}
 		} else { // not back online and doesnt have taint but is trigger node (issue when group patching)
 			// TODO: group taint nodes
-			addToGroupCaches()
+			err := addToGroupCaches()
+
 			err := r.patchGroupTaint(ctx, n)
 			if err != nil {
 				log.Error(err, "group taint was not applied to all nodes")
@@ -147,7 +148,11 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				requeueAtEnd = true
 			} else {
 				// TODO: REMOVE NODE FROM CACHE AND NODPOOL FROM CACHE
-				removeFromGroupCaches()
+				err := removeFromGroupCaches(&n)
+				// if err != nil {
+				// 	// TODO: NOT SURE HOW TO ERROR HANDLER HERE
+					
+				// }
 			}
 		}
 	}
@@ -164,7 +169,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	ok, nodepoolInCache := checkNodepoolCache(&n)
 	// TODO: its nodepool is not in the cache
-	if (nodeStatus == v1.ConditionUnknown || nodeStatus == v1.ConditionFalse) && !removeTaint && ok && !nodepoolInCache{ // need to operate on node
+	if isNodeNotReadyOrUnknown(&n) && !removeTaint && ok && !nodepoolInCache { // need to operate on node
 		// Node unready and nodepool not in cache
 
 		if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
@@ -190,7 +195,8 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 				// taint the nodes in the nodepool associated with this node
 				// TODO: ADD TO CACHE HERE BOTH THE NODEPOOL AND THE TRIGGER NODE
-				addToGroupCaches()
+				err := addToGroupCaches()
+				
 				err := r.patchGroupTaint(ctx, n)
 				if err != nil {
 					log.Error(err, "group taint was not applied to all nodes")
@@ -234,13 +240,25 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // TODO: ADD THIS FUNCTIONALITY
-func checkIfNodeReady(n *v1.Node) bool {
-	for _, c := 
+func isNodeReady(n *v1.Node) bool {
+	for _, condition := range n.Status.Conditions {
+		if condition.Type == v1.NodeReady {
+			return condition.Status == v1.ConditionTrue
+		}
+	}
+
+	return false
 }
 
 // TODO: ADD THIS FUNCTIONALITY
-func checkBadCondition(n *v1.Node) bool {
+func isNodeNotReadyOrUnknown(n *v1.Node) bool {
+	for _, condition := range n.Status.Conditions {
+		if condition.Type == v1.NodeReady {
+			return condition.Status == v1.ConditionUnknown || condition.Status == v1.ConditionFalse
+		}
+	}
 
+	return true
 }
 
 // Get the VM instance of the node
@@ -494,4 +512,33 @@ func checkNodepoolCache(n *v1.Node) (bool, bool) {
 	}
 
 	return ok, nodepoolInCache
+}
+
+func removeFromGroupCaches(n *v1.Node) err {
+	delete(triggerNodeCache, n.Name)
+
+	npName, ok := n.Labels[nodePoolLabel]
+	if !ok {
+		return fmt.Errorf("Node does not have the nodepool label", "nodeName", n.Name, "label", nodePoolLabel)
+	}
+
+	delete(taintingNodepoolCache, npName)
+	return nil
+}
+
+func addToGroupCaches(n *v1.Node) err {
+	npName, ok := n.Labels[nodePoolLabel]
+	if !ok {
+		return fmt.Errorf("Node does not have the nodepool label", "nodeName", n.Name, "label", nodePoolLabel)
+	}
+
+	if _, exists := triggerNodeCache[n.Name]; !exists {
+		triggerNodeCache[n.Name] = npName
+	}
+
+	if _, exists := taintingNodepoolCache[npName]; !exists {
+		taintingNodepoolCache[npName] = n.Name
+	}
+
+	return nil
 }
