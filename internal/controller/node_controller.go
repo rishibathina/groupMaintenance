@@ -96,11 +96,10 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Check if the node has the taint for atleast 2 minutes
 	// or the node has come back online
 	requeueAtEnd := false
-	// TODO AND IT IS IN THE CACHE
+	removeTaint := false
+	// TODO: AND IT IS IN THE CACHE
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
-		removeTaint := false
-
-		if (c.Status == v1.ConditionTrue) { // if node comes back online
+		if (n.Status.Conditions.Status == v1.ConditionTrue) { // if node comes back online
 			// TODO: ONLY IF IT IS IN THE CACHE 
 			removeTaint = true
 		} else {
@@ -135,53 +134,65 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	
 	// In MC this should be last
 	// Check if the node needs the taint 
-	for _, c := range cs {
-		if (c.Status == v1.ConditionUnknown || c.Status == v1.ConditionFalse) { // need to operate on node
-			if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
-				projectID, zone, instanceName := getVMInfo(n)
-				if projectID == "" || zone == "" || instanceName == "" {
-					log.Error(err, "failed to get accurate VM info for node: ", nodeName)
-					break
-				}
-				
-				vmRepairing, err := r.checkVMRepairing(projectID, zone, instanceName, ctx)
+	requeueTwoMins := false 
+	nodeStatus := n.Status.Conditions.Status
+	if (nodeStatus == v1.ConditionUnknown || nodeStatus == v1.ConditionFalse) && !removeTaint { // need to operate on node
+		if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
+			hasVMInfoError := false
+			projectID, zone, instanceName := getVMInfo(n)
+			if projectID == "" || zone == "" || instanceName == "" {
+				log.Error(err, "failed to get accurate VM info for node: ", nodeName)
+				hasVMInfoError = true
+			}
+
+			vmRepairing := false
+			hasRepairCheckError := false
+			if !hasVMInfoError { // Only check VM repairing if VM info was successfully retrieved
+				vmRepairing, err = r.checkVMRepairing(projectID, zone, instanceName, ctx)
 				if err != nil {
 					log.Error(err, "failed to check if VM is in REPAIRING: ", nodeName)
-					break
+					hasRepairCheckError = true
+				}
+			}
+
+			if vmRepairing && !hasVMInfoError && !hasRepairCheckError { // VM is in repairing and no errors occurred
+				log.Info("VM for ", instanceName, " is in REPAIRING")
+
+				// TODO: Add tainting nodepool
+				// taint the nodes in the nodepool associated with this node
+				err := r.patchGroupTaint(ctx, n)
+				if err != nil {
+					log.Error(err, "group taint was not applied to all nodes")
+					requeueAtEnd = true
+
 				}
 
-				if vmRepairing { // VM is in repairing and condition is either Unknown or notReady
-					log.Info("VM for ", instanceName, " is in REPAIRING")
+				log.Info("Taint successfully applied")
 
-					// TODO: Add tainting nodepool 
-					// taint the nodes in the nodepool associated with this node
-					err := r.patchGroupTaint(ctx, n)
-					if err != nil {
-						log.Error(err, "group taint was not applied to all nodes")
-						requeueAtEnd = true
-						break
-					}
-
-					log.Info("Taint successfully applied")
-
-					// Requeue to serve as a timeout for the taint
-					return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+				// Requeue to serve as a timeout for the taint
+				requeueTwoMins = true
+			} else {
+				if hasVMInfoError {
+					log.Info("Skipping VM REPAIRING check due to VM info error for node: ", nodeName)
+				} else if hasRepairCheckError {
+					log.Info("VM for ", instanceName, " might not be in REPAIRING due to check error.")
 				} else {
 					log.Info("VM for ", instanceName, " is not in REPAIRING")
 				}
-			} else {
-				log.Info("Found an unhealthy nodes that already has the groupTaint")
 			}
-			break
+		} else {
+			log.Info("Found an unhealthy nodes that already has the groupTaint")
 		}
+		
 	}
-	
-	if !requeueAtEnd { // if nothing went wrong along the way 
-		return ctrl.Result{}, nil
-	} else { // if something went wrong in the process, requeue for 15 seconds later
+
+	if requeueTwoMins {
+		return ctrl.Result{RequeueAfter: 2 * time.Minute}, nil
+	} else if requeueAtEnd { // if nothing went wrong along the way 
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	} else { // if something went wrong in the process, requeue for 15 seconds later
+		return ctrl.Result{}, nil
 	}
-	
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -189,6 +200,10 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Node{}).
 		Complete(r)
+}
+
+func checkIfNodeReady(n *v1.Node) bool {
+	for _, c := 
 }
 
 // Get the VM instance of the node
