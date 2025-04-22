@@ -233,8 +233,14 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// TODO: ADD THIS FUNCTIONALITY
 func checkIfNodeReady(n *v1.Node) bool {
 	for _, c := 
+}
+
+// TODO: ADD THIS FUNCTIONALITY
+func checkBadCondition(n *v1.Node) bool {
+
 }
 
 // Get the VM instance of the node
