@@ -67,6 +67,8 @@ type NodeReconciler struct {
 	ProjectNumber        int
 	ClusterName          string
 	Location             string
+	triggerNodeCache map[string]string // node that triggered group tainting -> nodepool it is a part of
+	taintingNodepoolCache map[string]string // nodepool name that is tainted -> trigger node
 }
 
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;create;update;patch;delete
@@ -93,15 +95,21 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	"""
+	Removing Taint logic
+	"""
 	// Check if the node has the taint for atleast 2 minutes
 	// or the node has come back online
 	requeueAtEnd := false
 	removeTaint := false
+
 	// TODO: AND IT IS IN THE CACHE
-	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
+	// TODO: fix this so that it accounts for edge case where trigger node wasnt tainted but other nodes in the pool were do to sm issue when tainting
+	_, ok := triggerNodeCache[n.Name]
+	if ok { // has trigger node
 		if (n.Status.Conditions.Status == v1.ConditionTrue) { // if node comes back online
 			removeTaint = true
-		} else {
+		} else if hasTaintKey(n, outOfServiceKey) { // timeout case
 			// get the taint application time
 			// taintApplyTime == "" if apply time isnt found
 			taintApplyTime := getTaintApplyTime(n, outOfServiceKey)
@@ -120,6 +128,8 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					removeTaint = true
 				}
 			}
+		} else { // not back online but and doesnt have taint but is trigger node (issue when group patching)
+			// TODO: group taint nodes
 		}
 
 		if removeTaint {
@@ -128,16 +138,27 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				log.Error(err, "Failed to remove taints")
 				// requeue for 15 seconds at the end
 				requeueAtEnd = true
+			} else {
+				// TODO: REMOVE NODE FROM CACHE AND NODPOOL FROM CACHE
 			}
 		}
 	}
 	
+
+
+	"""
+	Applying Taint logic
+	"""
 	// In MC this should be last
 	// Check if the node needs the taint 
 	requeueTwoMins := false 
 	nodeStatus := n.Status.Conditions.Status
+
+	ok, nodepoolInCache := checkNodepoolCache(&n)
 	// TODO: its nodepool is not in the cache
-	if (nodeStatus == v1.ConditionUnknown || nodeStatus == v1.ConditionFalse) && !removeTaint { // need to operate on node
+	if (nodeStatus == v1.ConditionUnknown || nodeStatus == v1.ConditionFalse) && !removeTaint && ok && !nodepoolInCache{ // need to operate on node
+		// Node unready and nodepool not in cache
+
 		if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
 			hasVMInfoError := false
 			projectID, zone, instanceName := getVMInfo(n)
@@ -160,6 +181,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				log.Info("VM for ", instanceName, " is in REPAIRING")
 
 				// taint the nodes in the nodepool associated with this node
+				// TODO: ADD TO CACHE HERE BOTH THE NODEPOOL AND THE TRIGGER NODE
 				err := r.patchGroupTaint(ctx, n)
 				if err != nil {
 					log.Error(err, "group taint was not applied to all nodes")
@@ -180,7 +202,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					log.Info("VM for ", instanceName, " is not in REPAIRING")
 				}
 			}
-		} else {
+		} else { // THIS SHOULD NEVER HAPPEN SINCE IF IT HAS THE TAINT THE NODEPOOL SHOULD BE IN THE CACHE
 			log.Info("Found an unhealthy nodes that already has the groupTaint")
 		}
 		
@@ -208,7 +230,7 @@ func checkIfNodeReady(n *v1.Node) bool {
 
 // Get the VM instance of the node
 // Returns strings in the order of: projectID, Zone, instanceName
-func getVMInfo(node *v1.Node) string, string, string {
+func getVMInfo(node *v1.Node) (string, string, string) {
 	providerID := node.Spec.ProviderID
 	if !strings.HasPrefix(providerID, "gce://") {
 		return "", "", ""
@@ -223,7 +245,7 @@ func getVMInfo(node *v1.Node) string, string, string {
 }
 
 // Check if the VM instance is in repairing status
-func (r *NodeReconciler) checkVMRepairing(projectID string, zone string, instanceName string, ctx context.Context) bool, error {
+func (r *NodeReconciler) checkVMRepairing(projectID string, zone string, instanceName string, ctx context.Context) (bool, error) {
 	instancesClient, err := compute.NewInstancesRESTClient(ctx)
 	if err != nil {
 		log.Error("compute.NewInstancesRESTClient: %v", err)
@@ -280,6 +302,7 @@ func (r *NodeReconciler) patchGroupTaint(ctx context.Context, n *v1.Node) error 
 	for _, otherNode := range nl.Items {
 		otherNodePoolName, otherOk := otherNode.Labels[nodePoolLabel]
 		if otherOk && otherNodePoolName == npName && otherNode.Name != n.Name { // checking that the nodepool is the same and it isn't the current node
+			// TODO: CHECK IF THE NODE ALREADY HAS THE TAINT WE DONT WANT TO ADD TWO INSTANCES OF THE SAME TAINT 
 			log.Info("Patching node with group taint", "nodeName:", otherNode.Name, "taint:", groupTaint)
 
 			// Patch the node with the group taint
@@ -443,4 +466,17 @@ func listNodesInNodepool(n *v1.Node) (*v1.NodeList, error){
 	}
 
 	return nl, nil
+}
+
+func checkNodepoolCache(n *v1.Node) (bool, bool) {
+	nodepoolInCache := false
+	npName, ok := n.Labels[nodePoolLabel]
+	if ok {
+		_, found := taintingNodepoolCache[npName]
+		if found {
+			nodepoolInCache = true
+		}
+	}
+
+	return ok, nodepoolInCache
 }
