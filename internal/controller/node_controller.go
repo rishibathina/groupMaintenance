@@ -100,7 +100,6 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// TODO: AND IT IS IN THE CACHE
 	if hasTaintKey(n, outOfServiceKey) { // has out-of-service
 		if (n.Status.Conditions.Status == v1.ConditionTrue) { // if node comes back online
-			// TODO: ONLY IF IT IS IN THE CACHE 
 			removeTaint = true
 		} else {
 			// get the taint application time
@@ -115,6 +114,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				taintTooLong, err = isTaintAppliedTooLong(taintApplyTime)
 				if err != nil {
 					log.Error(err, "Could not check if the taint has been on for too long")
+					removeTaint = true
 				}
 				if taintTooLong {
 					removeTaint = true
@@ -136,6 +136,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Check if the node needs the taint 
 	requeueTwoMins := false 
 	nodeStatus := n.Status.Conditions.Status
+	// TODO: its nodepool is not in the cache
 	if (nodeStatus == v1.ConditionUnknown || nodeStatus == v1.ConditionFalse) && !removeTaint { // need to operate on node
 		if !hasTaintKey(n, outOfServiceKey) { // the node doesn't already have the taint
 			hasVMInfoError := false
@@ -158,7 +159,6 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			if vmRepairing && !hasVMInfoError && !hasRepairCheckError { // VM is in repairing and no errors occurred
 				log.Info("VM for ", instanceName, " is in REPAIRING")
 
-				// TODO: Add tainting nodepool
 				// taint the nodes in the nodepool associated with this node
 				err := r.patchGroupTaint(ctx, n)
 				if err != nil {
