@@ -30,8 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
-	"nodemanagement.gke.io/maintenance-controller/engine/opportunisticmaintenance"
-	"nodemanagement.gke.io/maintenance-controller/services"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -196,7 +194,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				// taint the nodes in the nodepool associated with this node
 				// TODO: ADD TO CACHE HERE BOTH THE NODEPOOL AND THE TRIGGER NODE
 				err := addToGroupCaches()
-				
+
 				err := r.patchGroupTaint(ctx, n)
 				if err != nil {
 					log.Error(err, "group taint was not applied to all nodes")
