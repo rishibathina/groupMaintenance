@@ -107,6 +107,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// TODO: fix this so that it accounts for edge case where trigger node wasnt tainted but other nodes in the pool were do to sm issue when tainting
 	_, ok := triggerNodeCache[n.Name]
 	if ok { // has trigger node
+		// TODO: FIX this
 		if (n.Status.Conditions.Status == v1.ConditionTrue) { // if node comes back online
 			removeTaint = true
 		} else if hasTaintKey(n, outOfServiceKey) { // timeout case
@@ -128,8 +129,14 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					removeTaint = true
 				}
 			}
-		} else { // not back online but and doesnt have taint but is trigger node (issue when group patching)
+		} else { // not back online and doesnt have taint but is trigger node (issue when group patching)
 			// TODO: group taint nodes
+			addToGroupCaches()
+			err := r.patchGroupTaint(ctx, n)
+			if err != nil {
+				log.Error(err, "group taint was not applied to all nodes")
+				requeueAtEnd = true
+			}
 		}
 
 		if removeTaint {
@@ -140,6 +147,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 				requeueAtEnd = true
 			} else {
 				// TODO: REMOVE NODE FROM CACHE AND NODPOOL FROM CACHE
+				removeFromGroupCaches()
 			}
 		}
 	}
@@ -182,6 +190,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 				// taint the nodes in the nodepool associated with this node
 				// TODO: ADD TO CACHE HERE BOTH THE NODEPOOL AND THE TRIGGER NODE
+				addToGroupCaches()
 				err := r.patchGroupTaint(ctx, n)
 				if err != nil {
 					log.Error(err, "group taint was not applied to all nodes")
