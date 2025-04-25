@@ -196,12 +196,14 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 					log.Error(err, "group taint was not applied to all nodes")
 					requeueAtEnd = true
 
+				} else {
+					log.Info("Taint successfully applied")
+
+					// Requeue to serve as a timeout for the taint
+					requeueTwoMins = true
 				}
 
-				log.Info("Taint successfully applied")
-
-				// Requeue to serve as a timeout for the taint
-				requeueTwoMins = true
+				
 			} else {
 				if hasVMInfoError {
 					log.Info("Skipping VM REPAIRING check due to VM info error for node: ", nodeName)
