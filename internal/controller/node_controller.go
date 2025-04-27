@@ -257,22 +257,6 @@ func isNodeNotReadyOrUnknown(n *v1.Node) bool {
 	return true
 }
 
-// Get the VM instance of the node
-// Returns strings in the order of: projectID, Zone, instanceName
-func getVMInfo(node *v1.Node) (string, string, string) {
-	providerID := node.Spec.ProviderID
-	if !strings.HasPrefix(providerID, "gce://") {
-		return "", "", ""
-	}
-
-	parts := strings.Split(strings.TrimPrefix(providerID, "gce://"), "/")
-	if len(parts) != 3 {
-		return "", "", ""
-	}
-
-	return parts[0], parts[1], parts[2]
-}
-
 // Check if the VM instance is in repairing status
 func (r *NodeReconciler) checkVMRepairing(projectID string, zone string, instanceName string, ctx context.Context) (bool, error) {
 	instancesClient, err := compute.NewInstancesRESTClient(ctx)
